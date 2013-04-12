@@ -2,7 +2,7 @@
 %%
 %% restc: Erlang Rest Client
 %%
-%% Copyright (c) 2012 KIVRA
+%% Copyright (c) 2012-2013 KIVRA
 %%
 %% Permission is hereby granted, free of charge, to any person obtaining a
 %% copy of this software and associated documentation files (the "Software"),
@@ -26,16 +26,23 @@
 
 -module(restc).
 
--export([
-         request/1
-         ,request/2
-         ,request/3
-         ,request/4
-         ,request/5
-         ,request/6
-        ]).
+-export([request/1]).
+-export([request/2]).
+-export([request/3]).
+-export([request/4]).
+-export([request/5]).
+-export([request/6]).
 
--type method()       :: binary | head | get | put | post | trace | options | delete.
+-export([body/1]).
+
+-record(req, {
+                client,
+                status      :: status_code(),
+                headers     :: headers()
+             }).
+
+-type method()       :: binary | head | get | put | post | trace | options |
+                        delete | patch.
 -type url()          :: binary | string().
 -type headers()      :: [header()].
 -type header()       :: {binary(), binary()}.
@@ -46,9 +53,7 @@
 -type property()     :: atom() | tuple().
 -type proplist()     :: [property()].
 -type body()         :: binary() | proplist().
--type response()     :: {ok, Status::status_code(), Headers::headers(), Body::body()} |
-                        {error, Status::status_code(), Headers::headers(), Body::body()} |
-                        {error, Reason::reason()}.
+-type response()     :: {ok, #req{}} | {error, Reason::reason()}.
 
 -define(DEFAULT_ENCODING, json).
 -define(DEFAULT_CTYPE, <<"application/json">>).
@@ -57,48 +62,93 @@
 %%% API ========================================================================
 
 
--spec request(Url::url()) -> Response::response().
+%% @equiv request(get, ?DEFAULT_ENCODING, Url, [], [], [])
+-spec request(Url) -> Response when
+    Url      :: url(),
+    Response :: response().
 request(Url) ->
     request(get, ?DEFAULT_ENCODING, Url, [], [], []).
 
--spec request(Method::method(), Url::url()) -> Response::response().
+%% @equiv request(Method, ?DEFAULT_ENCODING, Url, [], [], [])
+-spec request(Method, Url) -> Response when
+    Method   :: method(),
+    Url      :: url(),
+    Response :: response().
 request(Method, Url) ->
     request(Method, ?DEFAULT_ENCODING, Url, [], [], []).
 
--spec request(Method::method(), Url::url(), Expect::status_codes()) -> Response::response().
+%% @equiv request(Method, ?DEFAULT_ENCODING, Url, Expect, [], [])
+-spec request(Method, Url, Expect) -> Response when
+    Method   :: method(),
+    Url      :: url(),
+    Expect   :: status_codes(),
+    Response :: response().
 request(Method, Url, Expect) ->
     request(Method, ?DEFAULT_ENCODING, Url, Expect, [], []).
 
--spec request(Method::method(), Type::content_type(), Url::url(),
-              Expect::status_codes()) -> Response::response().
+%% @equiv request(Method, Type, Url, Expect, [], [])
+-spec request(Method, Type, Url, Expect) -> Response when
+    Method   :: method(),
+    Type     :: content_type(),
+    Url      :: url(),
+    Expect   :: status_codes(),
+    Response :: response().
 request(Method, Type, Url, Expect) ->
     request(Method, Type, Url, Expect, [], []).
 
--spec request(Method::method(), Type::content_type(), Url::url(),
-              Expect::status_codes(), Headers::headers()) -> Response::response().
+%% @equiv request(Method, Type, Url, Expect, Headers, [])
+-spec request(Method, Type, Url, Expect, Headers) -> Response when
+    Method   :: method(),
+    Type     :: content_type(),
+    Url      :: url(),
+    Expect   :: status_codes(),
+    Headers  :: headers(),
+    Response :: response().
 request(Method, Type, Url, Expect, Headers) ->
     request(Method, Type, Url, Expect, Headers, []).
 
--spec request(Method::method(), Type::content_type(), Url::url(),
-              Expect::status_codes(), Headers::headers(), Body::body()) -> Response::response().
-request(Method, Type, Url, Expect, Headers, Body) ->
-    AccessType = get_accesstype(Type),
-    Headers1 = [{<<"Accept">>, <<AccessType/binary, ", */*;q=0.9">>} | Headers],
-    Headers2 = [{<<"Content-Type">>, get_ctype(Type)} | Headers1],
-    Response = parse_response(do_request(Method, Type, Url, Headers2, Body)),
+%% @doc Perform a request and parse any incoming and/or outgoing payload
+%%      using the given content type.
+-spec request(Method, Type, Url, Expect, Headers, Body) -> Response when
+    Method   :: method(),
+    Type     :: content_type(),
+    Url      :: url(),
+    Expect   :: status_codes(),
+    Headers  :: headers(),
+    Body     :: body(),
+    Response :: response().
+request(Method, Type, Url, Expect, Headers0, Body) ->
+    Headers1 = augment_headers(Type, Headers0),
+    Response = parse_response(do_request(Method, Type, Url, Headers1, Body)),
     case Response of
-        {ok, Status, H, B} ->
+        #req{status = Status} ->
             case check_expect(Status, Expect) of
-                true -> Response;
-                false -> {error, Status, H, B}
+                true  -> {ok, Response};
+                false -> {error, Response}
             end;
         Error ->
             Error
     end.
 
+-spec body(Req :: #req{}) -> {ok, binary(), #req{}} | {error, atom()}.
+body(#req{client = Client, headers = Headers} = Req) ->
+    Type = proplists:get_value(<<"Content-Type">>, Headers, ?DEFAULT_CTYPE),
+    Type2 = parse_type(Type),
+    case hackney:body(Client) of
+        {ok, Body, Client2} ->
+            {ok, parse_body(Type2, Body), Req#req{client = Client2}};
+        Error               -> Error
+    end.
+
 
 %%% INTERNAL ===================================================================
 
+
+augment_headers(Type, Headers0) ->
+    Headers1 = lists:delete(<<"Accept">>, Headers0),
+    Headers2 = lists:delete(<<"Content-Type">>, Headers1),
+    [{<<"Accept">>, <<(get_accesstype(Type))/binary, ", */*;q=0.9">>},
+     {<<"Content-Type">>, get_ctype(Type)} | Headers2].
 
 do_request(post, Type, Url, Headers, Body) ->
     Body2 = encode_body(Type, Body),
@@ -124,11 +174,7 @@ encode_body(_, Body) ->
    encode_body(?DEFAULT_ENCODING, Body).
 
 parse_response({ok, Status, Headers, Client}) ->
-    Type = proplists:get_value(<<"Content-Type">>, Headers, ?DEFAULT_CTYPE),
-    Type2 = parse_type(Type),
-    {ok, Body, Client2} = hackney:body(Client),
-    Body2 = parse_body(Type2, Body),
-    {ok, Status, Headers, Body2, Client2};
+    #req{status = Status, headers = Headers, client = Client};
 parse_response({error, Type}) ->
     {error, Type}.
 
@@ -138,15 +184,16 @@ parse_type(Type) ->
         _ -> Type
     end.
 
-parse_body([], Body)                 -> Body;
-parse_body(_, [])                    -> [];
-parse_body(_, <<>>)                  -> [];
+parse_body([], Body)                     -> Body;
+parse_body(_, [])                        -> [];
+parse_body(_, <<>>)                      -> [];
 parse_body(<<"application/json">>, Body) -> jsx:decode(Body);
 parse_body(<<"application/xml">>, Body)  ->
     {ok, Data, _} = erlsom:simple_form(binary_to_list(Body)),
     Data;
-parse_body(<<"text/xml">>, Body) -> parse_body(<<"application/xml">>, Body);
-parse_body(_, Body)          -> Body.
+parse_body(<<"text/xml">>, Body)         ->
+    parse_body(<<"application/xml">>, Body);
+parse_body(_, Body)                      -> Body.
 
 get_accesstype(json)    -> <<"application/json">>;
 get_accesstype(xml)     -> <<"application/xml">>;
