@@ -34,6 +34,8 @@
 -export([request/6]).
 
 -export([body/1]).
+-export([headers/1]).
+-export([header/2]).
 
 -record(req, {
                 client,
@@ -130,19 +132,53 @@ request(Method, Type, Url, Expect, Headers0, Body) ->
             Error
     end.
 
--spec body(Req :: #req{}) -> {ok, binary(), #req{}} | {error, atom()}.
+-spec body(Req) -> Result when
+    Req    :: #req{},
+    Result :: {binary(), #req{}} | {error, atom()}.
 body(#req{client = Client, headers = Headers} = Req) ->
-    Type = proplists:get_value(<<"Content-Type">>, Headers, ?DEFAULT_CTYPE),
+    Type = get_val(<<"Content-Type">>, Headers, ?DEFAULT_CTYPE),
     Type2 = parse_type(Type),
     case hackney:body(Client) of
         {ok, Body, Client2} ->
-            {ok, parse_body(Type2, Body), Req#req{client = Client2}};
+            {parse_body(Type2, Body), Req#req{client = Client2}};
         Error               -> Error
     end.
+
+-spec headers(Req0) -> {Headers, Req1} when
+    Req0    :: #req{},
+    Req1    :: #req{},
+    Headers :: headers().
+headers(Req) ->
+    {Req#req.headers, Req}.
+
+%% @equiv header(Key, Req0, undefined)
+-spec header(Key, Req0) -> {Header, Req1} | {undefined, Req1} when
+    Key    :: binary(),
+    Req0   :: #req{},
+    Header :: binary(),
+    Req1   :: #req{}.
+header(Key, Req0) ->
+    header(Key, Req0, undefined).
+
+-spec header(Key, Req0, Default) -> {Header, Req1} | {Default, Req1} when
+    Key     :: binary(),
+    Req0    :: #req{},
+    Default :: any(),
+    Header  :: binary(),
+    Req1    :: #req{}.
+header(Key, Req0, Default) ->
+    {Headers, Req1} = headers(Req0),
+    {get_val(Key, Headers, Default), Req1}.
 
 
 %%% INTERNAL ===================================================================
 
+
+get_val(Key, List, Default) ->
+    case lists:keyfind(Key, 1, List) of
+        {Key, Val} -> Val;
+        _          -> Default
+    end.
 
 augment_headers(Type, Headers0) ->
     Headers1 = lists:delete(<<"Accept">>, Headers0),
